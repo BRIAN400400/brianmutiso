@@ -8,25 +8,29 @@
 #include <ArduinoJson.h>
 #include "MAX30105.h"
 #include "heartRate.h"
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
-#define MODEM_TX 19
-#define MODEM_RX 18
+#define TX 19
+#define RX 18
 #define SDA 5
 #define SCL 4
+#define buzzer 10
 #define SerialAT Serial1
 
 const char* ssid = "wifi";
-const char* password = "0112507198";
-const char targetNumber[] = "+254787352127"; 
-const char message[] = "Hello there, your loved one has experienced a fall. Attention needed";
+const char* password = "12345678";
+const char Number[] = "+254112507198";
+const char message[] = "Hello there, your loved one has experienced a fall. Action needed";
+const int oneWireBus = 3;
 const float FALL_THRESHOLD = 0.4;     // g units
 const float IMPACT_THRESHOLD = 2.5;
-const long IR_FINGER_THRESHOLD = 50000;
+const long IR_FINGER_THRESHOLD = 15000;
 const byte RATE_SIZE = 8;
 long lastBeat = 0;
 float bpm = 0;
 int bpmAvg = 0;
-float tempC = 0;
+float temperatureC= 0;
 bool fingerOn = false;
 unsigned long lastSampleMs = 0;
 unsigned long lastTempMs = 0;
@@ -34,6 +38,8 @@ unsigned long lastTempMs = 0;
 MAX30105 particleSensor;
 TinyGsm modem(SerialAT);
 MPU6050 mpu(Wire);
+OneWire oneWire(oneWireBus);
+DallasTemperature sensors(&oneWire);
 byte rateBuffer[RATE_SIZE];
 byte rateIndex = 0;
 
@@ -103,10 +109,9 @@ String webpage = R"rawliteral(
         <div class="value" id="avg">0</div>
 
         <div class="label">Temperature</div>
-        <div class="value" id="temp">0</div>
-
-        <div class="status" id="finger">NO FINGER</div>
-
+        <div class="value" id="temperatureC">0</div>
+        
+       <div class="status" id="finger">NO FINGER</div>
     </div>
 
 <script>
@@ -119,8 +124,8 @@ function updateData(){
 
         document.getElementById("bpm").innerHTML = data.bpm;
         document.getElementById("avg").innerHTML = data.avg;
-        document.getElementById("temp").innerHTML = data.temp + " °C";
-
+        document.getElementById("temperatureC").innerHTML = data.temperatureC + " °C";
+        
         if(data.finger){
             document.getElementById("finger").innerHTML = "FINGER DETECTED";
         }
@@ -148,7 +153,7 @@ void handleData() {
 
     doc["bpm"] = (int)bpm;
     doc["avg"] = bpmAvg;
-    doc["temp"] = String(tempC,1);
+    doc["temperatureC"] = String(temperatureC,1);
     doc["finger"] = fingerOn;
 
     String json;
@@ -169,11 +174,15 @@ void setup() {
   Serial.println(IP);
    //sserial and 12C communication starting
   Serial.println("Starting...");
-  SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+  SerialAT.begin(115200, SERIAL_8N1, RX, TX);
   Wire.begin(SDA, SCL);
   delay(3000);
+  //temp sensor
+   pinMode(oneWireBus, INPUT_PULLUP);
+
+  sensors.begin();
   //starting gsm
-  Serial.println("Testing AT...");
+  Serial.println("Testing");
   SerialAT.println("AT");
   delay(1000);
   while (SerialAT.available()) {
@@ -183,14 +192,14 @@ void setup() {
   modem.restart();
   delay(3000);
 //starting mpu
-  Serial.println("Initializing MPU...");
+  Serial.println("Initializing accelerometer");
 
  mpu.begin();
   mpu.calcGyroOffsets(true);
 
   Serial.println("MPU6050 Ready!");
  //gsm network conncetion 
-  Serial.println("Waiting for network...");
+ Serial.println("Waiting for network...");
   int reg = 0;
   for (int i = 0; i < 30; i++) {
     reg = modem.getRegistrationStatus();
@@ -205,14 +214,14 @@ void setup() {
     while (true) {
   Serial.println("Retrying network...");
   delay(2000);
-}
-  }
-  Serial.println("Registered on network!");
+} 
+  } 
+  Serial.println("Registered on network!"); 
 
-  int csq = modem.getSignalQuality();
+  int signalquality = modem.getSignalQuality();
   Serial.print("Signal: ");
-  Serial.println(csq);
-//initializing max30102
+  Serial.println(signalquality);
+//starting max sensor
 if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
 
         Serial.println("MAX30102 NOT FOUND");
@@ -233,7 +242,7 @@ if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
     particleSensor.setPulseAmplitudeIR(0x1F);
     particleSensor.setPulseAmplitudeGreen(0);
 
-    tempC = particleSensor.readTemperature();
+    //tempC = particleSensor.readTemperature();
     //starting server
     server.on("/", handleRoot);
     server.on("/data", handleData);
@@ -241,86 +250,88 @@ if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
     server.begin();
 
     Serial.println("Web Server Started");
- 
+   pinMode(buzzer, OUTPUT);
 }
 
 void loop() {
+
   server.handleClient();
 
-    unsigned long now = millis();
-    if (now - lastSampleMs >= 20) {
+  unsigned long now = millis();
 
-        lastSampleMs = now;
+  if (now - lastSampleMs >= 10) {
 
-        long irValue = particleSensor.getIR();
+    lastSampleMs = now;
 
-        fingerOn = (irValue > IR_FINGER_THRESHOLD);
+    long irValue = particleSensor.getIR();
 
-        if (fingerOn) {
+    fingerOn = (irValue > IR_FINGER_THRESHOLD);
 
-            if (checkForBeat(irValue)) {
+    if (fingerOn) {
 
-                long delta = now - lastBeat;
-                lastBeat = now;
+      if (checkForBeat(irValue)) {
 
-                float beatsPerMinute = 60.0 / (delta / 1000.0);
+        long delta = now - lastBeat;
+        lastBeat = now;
 
-                if (beatsPerMinute > 40 && beatsPerMinute < 220) {
+        float beatsPerMinute = 60.0 / (delta / 1000.0);
 
-                    bpm = beatsPerMinute;
+        if (beatsPerMinute > 40 && beatsPerMinute < 220) {
 
-                    rateBuffer[rateIndex++] = (byte)bpm;
-                    rateIndex %= RATE_SIZE;
+          bpm = beatsPerMinute;
 
-                    long total = 0;
+          rateBuffer[rateIndex++] = (byte)bpm;
+          rateIndex %= RATE_SIZE;
 
-                    for (byte i = 0; i < RATE_SIZE; i++) {
-                        total += rateBuffer[i];
-                    }
+          long total = 0;
 
-                    bpmAvg = total / RATE_SIZE;
+          for (byte i = 0; i < RATE_SIZE; i++) {
+            total += rateBuffer[i];
+          }
 
-                    Serial.print("BPM: ");
-                    Serial.println(bpmAvg);
-                }
-            }
+          bpmAvg = total / RATE_SIZE;
+
+          Serial.print("BPM: ");
+          Serial.println(bpmAvg);
         }
-        else {
+      }
 
-            bpm = 0;
-            bpmAvg = 0;
-            lastBeat = 0;
+    } else {
 
-            for (byte i = 0; i < RATE_SIZE; i++) {
-                rateBuffer[i] = 0;
-            }
-        }
+      bpm = 0;
+      bpmAvg = 0;
     }
-    if (now - lastTempMs >= 5000) {
+  }
 
-        lastTempMs = now;
+  if (now - lastTempMs >= 5000) {
 
-        tempC = particleSensor.readTemperature();
-    }
+    lastTempMs = now;
+
+    //tempC = particleSensor.readTemperature();
+  sensors.requestTemperatures();
+  temperatureC = sensors.getTempCByIndex(0);
+  Serial.print("Temperature: ");
+    Serial.print(temperatureC);
+  }
+
   mpu.update();
 
   float ax = mpu.getAccX();
   float ay = mpu.getAccY();
   float az = mpu.getAccZ();
 
-  float total_accel = sqrt(ax*ax + ay*ay + az*az);
+  float total_accel = sqrt(ax * ax + ay * ay + az * az);
 
   Serial.print("Accel: ");
   Serial.println(total_accel);
 
-  // Detect free fall
   if (total_accel < FALL_THRESHOLD) {
 
     Serial.println("FREE FALL DETECTED!");
 
     unsigned long start = millis();
 
-    while (millis() - start < 1000) {
+    while (millis() - start < 500) {
 
       mpu.update();
 
@@ -328,32 +339,39 @@ void loop() {
       ay = mpu.getAccY();
       az = mpu.getAccZ();
 
-      float impact = sqrt(ax*ax + ay*ay + az*az);
+      float impact = sqrt(ax * ax + ay * ay + az * az);
 
       if (impact > IMPACT_THRESHOLD) {
 
-        Serial.print("IMPACT DETECTED: ");
-        Serial.println(impact);
+        Serial.println("IMPACT DETECTED!");
 
         triggerAlert();
+
         break;
       }
+
+      delay(5);
     }
   }
 
-  delay(50);
+  delay(5);
 }
 //alert mechanism
 void triggerAlert() {
   Serial.println("!!! FALL CONFIRMED !!!");
+  //buzzer on
+  digitalWrite (buzzer, HIGH);
+   delay(3000);
+   digitalWrite(buzzer, LOW);
+  
   //send sms
-  if (modem.sendSMS(targetNumber, message)) {
+  if (modem.sendSMS(Number, message)) {
     Serial.println("SMS sent successfully!");
   } else {
     Serial.println("SMS failed to send.");}
   //make a call
-   Serial.println("Dialing +254787352127...");
-  if (modem.callNumber(targetNumber)) {
+   Serial.println("calling");
+  if (modem.callNumber(Number)) {
     Serial.println("Call connected!");
     delay(30000); 
     modem.callHangup();
